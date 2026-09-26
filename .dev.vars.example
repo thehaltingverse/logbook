@@ -1,0 +1,4 @@
+SESSION_SECRET=replace-with-a-long-random-string
+ALLOW_DEV_LOGIN=true
+ALLOWED_EMAILS=astrocheet4h@gmail.com
+GOOGLE_CLIENT_ID=
