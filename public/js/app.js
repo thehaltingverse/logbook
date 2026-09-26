@@ -373,6 +373,7 @@ function paintChoose() {
     children.push(h("button", { class: "button primary wide", type: "button", click: startCreate }, ["Create the log"]));
   }
   children.push(h("button", { class: state.logExists ? "button primary wide" : "button wide", type: "button", click: () => { state.screen = "join"; state.error = ""; render({ force: true }); } }, ["I have the recovery key"]));
+  children.push(h("button", { class: "text-button", type: "button", click: signOut }, ["Sign out"]));
   if (state.error) children.push(h("p", { class: "form-error" }, [state.error]));
   root.append(h("main", { class: "shell panel stack" }, children));
 }
