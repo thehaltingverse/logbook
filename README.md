@@ -1,14 +1,14 @@
 # Passdown
 
-A private log for two people. Each note has a date, a short text, one tag, and an optional IMPT marker. Notes are encrypted in the browser before they are saved, so the host stores only ciphertext.
+A private log for two people. Each note has a date, a short text, one tag, and an optional IMPORTANT marker. Notes are encrypted in the browser before they are saved, so the host stores only ciphertext. The log keeps the last 7 days in Pacific Time. Older notes are deleted when the log is opened.
 
 Sign-in is Google, limited to the addresses in `ALLOWED_EMAILS`. The second address can be added when you have it. Dates use Pacific Time.
 
 ## Tags
 
-Kids, House, Ops, Errands, and Reminders are built in. Either person can add a short ad hoc tag. IMPT is a marker on a note, not a tag, and the filter can combine it with a tag.
+F, House, Ops, Errands, and Reminders are built in. Notes saved under Kids show as F, and the author’s next visit stores that name. Either person can add a short ad hoc tag. IMPORTANT is a marker on a note, not a tag, and the filter can combine it with a tag.
 
-Only the author can edit or delete a note. Export CSV from the menu builds the file on the phone.
+Only the author can edit a note. Either person can delete any note. Export CSV from the menu builds the file on the phone.
 
 ## Recovery key
 
@@ -44,4 +44,4 @@ Do not set `ALLOW_DEV_LOGIN` on the deployed project.
 
 ## What the host can see
 
-Cloudflare can see that a row exists, about how large it is, when it changed, and which Google account owns it. The account id is stored so only the author can edit or delete. The date, text, tag, IMPT marker, and author name are inside the ciphertext. Deleted rows can be restored from Cloudflare's free point-in-time recovery for 7 days, still encrypted.
+Cloudflare can see that a row exists, about how large it is, when it changed, and which Google account owns it. The account id is stored so only the author can edit. Either person can delete a note. The date, text, tag, IMPORTANT marker, and author name are inside the ciphertext. Deleted rows can be restored from Cloudflare's free point-in-time recovery for 7 days, still encrypted.

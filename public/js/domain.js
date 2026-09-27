@@ -1,9 +1,12 @@
 export const TIME_ZONE = "America/Los_Angeles";
-export const SEED_TAGS = ["Kids", "House", "Ops", "Errands", "Reminders"];
+export const SEED_TAGS = ["F", "House", "Ops", "Errands", "Reminders"];
 export const MAX_TEXT = 400;
 export const MAX_EXTRA_TAGS = 24;
+export const RETENTION_DAYS = 7;
+export const IMPORTANT_LABEL = "IMPORTANT";
 
-const RESERVED = new Set(["all", "impt", "new", "new tag"]);
+const RESERVED = new Set(["all", "impt", "important", "new", "new tag"]);
+const LEGACY_TAGS = new Map([["kids", "F"]]);
 
 export function calendarDay(date, timeZone = TIME_ZONE) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -57,12 +60,25 @@ export function normalizeTag(input) {
   return String(input || "").trim().replace(/\s+/g, " ");
 }
 
+export function canonicalTag(input) {
+  const tag = normalizeTag(input);
+  return LEGACY_TAGS.get(tag.toLowerCase()) || tag;
+}
+
+export function retentionStart(today) {
+  return addCalendarDays(today, 1 - RETENTION_DAYS);
+}
+
+export function isWithinRetention(isoDate, today) {
+  return isRealDate(isoDate) && isRealDate(today) && isoDate >= retentionStart(today);
+}
+
 export function isValidTagShape(tag) {
   return tag.length > 0 && tag.length <= 20 && /^[\p{L}\p{N}]+(?: [\p{L}\p{N}]+)*$/u.test(tag);
 }
 
 export function validateExtraTag(input, existingTags) {
-  const tag = normalizeTag(input);
+  const tag = canonicalTag(input);
   if (!tag) return { ok: false, error: "Enter a tag name." };
   if (tag.length > 20) return { ok: false, error: "Keep the tag under 20 characters." };
   if (!isValidTagShape(tag)) return { ok: false, error: "Use letters, numbers, and spaces." };
@@ -78,7 +94,7 @@ export function mergeExtraTags(current, incoming) {
   const seen = new Set(SEED_TAGS.map((tag) => tag.toLowerCase()));
   for (const raw of [...current, ...incoming]) {
     if (typeof raw !== "string") continue;
-    const tag = normalizeTag(raw);
+    const tag = canonicalTag(raw);
     const key = tag.toLowerCase();
     if (!isValidTagShape(tag) || RESERVED.has(key) || seen.has(key)) continue;
     if (result.length >= MAX_EXTRA_TAGS) break;
@@ -92,19 +108,20 @@ export function tagsInOrder(extraTags, notes = []) {
   const seen = new Set(SEED_TAGS.map((tag) => tag.toLowerCase()));
   const extras = [];
   const found = [];
-  for (const tag of extraTags || []) {
-    if (typeof tag !== "string") continue;
+  for (const raw of extraTags || []) {
+    if (typeof raw !== "string") continue;
+    const tag = canonicalTag(raw);
     const key = tag.toLowerCase();
-    if (seen.has(key)) continue;
+    if (!tag || seen.has(key)) continue;
     seen.add(key);
     extras.push(tag);
   }
   extras.sort((a, b) => a.localeCompare(b));
   for (const note of notes) {
-    const tag = note?.tag;
-    if (typeof tag !== "string") continue;
+    if (typeof note?.tag !== "string") continue;
+    const tag = canonicalTag(note.tag);
     const key = tag.toLowerCase();
-    if (seen.has(key)) continue;
+    if (!tag || seen.has(key)) continue;
     seen.add(key);
     found.push(tag);
   }
@@ -121,7 +138,7 @@ export function sortNotes(notes, extraTags = []) {
   const order = tagsInOrder(extraTags, notes);
   return [...notes].sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? 1 : -1;
-    const byTag = tagRank(a.tag, order) - tagRank(b.tag, order);
+    const byTag = tagRank(canonicalTag(a.tag), order) - tagRank(canonicalTag(b.tag), order);
     if (byTag !== 0) return byTag;
     if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
     return String(a.id).localeCompare(String(b.id));
@@ -130,7 +147,7 @@ export function sortNotes(notes, extraTags = []) {
 
 export function filterNotes(notes, { tag = "All", importantOnly = false } = {}) {
   return notes.filter((note) => {
-    if (tag !== "All" && note.tag !== tag) return false;
+    if (tag !== "All" && canonicalTag(note.tag) !== canonicalTag(tag)) return false;
     if (importantOnly && !note.important) return false;
     return true;
   });
@@ -146,13 +163,17 @@ export function groupByDate(sortedNotes) {
   return groups;
 }
 
-export function validateNoteInput({ date, text, tag, allowedTags }) {
+export function validateNoteInput({ date, text, tag, allowedTags, today }) {
   if (!isRealDate(date)) return { ok: false, error: "Choose a date." };
+  if (today && !isWithinRetention(date, today)) return { ok: false, error: "That date is older than 7 days." };
   const body = String(text || "").trim();
   if (!body) return { ok: false, error: "Write a short note." };
   if (body.length > MAX_TEXT) return { ok: false, error: "Keep the note under 400 characters." };
-  if (!allowedTags.includes(tag)) return { ok: false, error: "Choose a tag." };
-  return { ok: true, date, text: body, tag };
+  const canonical = canonicalTag(tag);
+  if (!allowedTags.some((item) => canonicalTag(item).toLowerCase() === canonical.toLowerCase())) {
+    return { ok: false, error: "Choose a tag." };
+  }
+  return { ok: true, date, text: body, tag: canonical };
 }
 
 function csvCell(value) {
@@ -167,7 +188,7 @@ export function notesToCsv(notes) {
   for (const note of notes) {
     lines.push([
       note.date,
-      note.tag,
+      canonicalTag(note.tag),
       note.important ? "yes" : "no",
       note.authorName || "",
       note.text || "",

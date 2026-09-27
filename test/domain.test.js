@@ -4,11 +4,14 @@ import {
   SEED_TAGS,
   addCalendarDays,
   calendarDay,
+  canonicalTag,
   filterNotes,
   formatDayLabel,
   isRealDate,
+  isWithinRetention,
   mergeExtraTags,
   notesToCsv,
+  retentionStart,
   sortNotes,
   tagsInOrder,
   validateExtraTag,
@@ -16,8 +19,10 @@ import {
 } from "../public/js/domain.js";
 
 test("seed tags are the family list without Money", () => {
-  assert.deepEqual(SEED_TAGS, ["Kids", "House", "Ops", "Errands", "Reminders"]);
+  assert.deepEqual(SEED_TAGS, ["F", "House", "Ops", "Errands", "Reminders"]);
   assert.equal(SEED_TAGS.some((tag) => tag.toLowerCase() === "money"), false);
+  assert.equal(canonicalTag("Kids"), "F");
+  assert.equal(canonicalTag("kids"), "F");
 });
 
 test("calendar day follows Pacific Time across daylight saving", () => {
@@ -47,33 +52,59 @@ test("notes sort by date, then tag order, then newest first", () => {
   assert.deepEqual(sorted.map((note) => note.id), ["kids-new", "kids-old", "ops", "older-day"]);
 });
 
-test("filters combine a tag and IMPT", () => {
+test("the log keeps a rolling 7 day window", () => {
+  assert.equal(retentionStart("2026-09-27"), "2026-09-21");
+  assert.equal(isWithinRetention("2026-09-21", "2026-09-27"), true);
+  assert.equal(isWithinRetention("2026-09-20", "2026-09-27"), false);
+  assert.equal(isWithinRetention("2026-10-01", "2026-09-27"), true);
+  const old = validateNoteInput({
+    date: "2026-09-20",
+    text: "Old",
+    tag: "F",
+    allowedTags: SEED_TAGS,
+    today: "2026-09-27",
+  });
+  assert.equal(old.ok, false);
+  const kept = validateNoteInput({
+    date: "2026-09-21",
+    text: "Keep",
+    tag: "Kids",
+    allowedTags: SEED_TAGS,
+    today: "2026-09-27",
+  });
+  assert.equal(kept.tag, "F");
+});
+
+test("filters combine a tag and IMPORTANT", () => {
   const notes = [
     { tag: "Kids", important: true },
-    { tag: "Kids", important: false },
+    { tag: "F", important: false },
     { tag: "Ops", important: true },
   ];
+  assert.equal(filterNotes(notes, { tag: "F", importantOnly: true }).length, 1);
   assert.equal(filterNotes(notes, { tag: "Kids", importantOnly: true }).length, 1);
   assert.equal(filterNotes(notes, { tag: "All", importantOnly: true }).length, 2);
   assert.equal(filterNotes(notes, { tag: "Ops" }).length, 1);
 });
 
 test("tag order keeps the fixed list ahead of ad hoc tags", () => {
-  assert.deepEqual(tagsInOrder(["Pets", "Guests"], [{ tag: "School" }]), [
-    "Kids", "House", "Ops", "Errands", "Reminders", "Guests", "Pets", "School",
+  assert.deepEqual(tagsInOrder(["Pets", "Kids", "Guests"], [{ tag: "School" }, { tag: "Kids" }]), [
+    "F", "House", "Ops", "Errands", "Reminders", "Guests", "Pets", "School",
   ]);
 });
 
 test("ad hoc tags reject reserved names and Money is not special-cased as allowed", () => {
   assert.equal(validateExtraTag("IMPT", []).ok, false);
+  assert.equal(validateExtraTag("IMPORTANT", []).ok, false);
   assert.equal(validateExtraTag("kids", []).ok, false);
+  assert.equal(validateExtraTag("F", []).ok, false);
   assert.equal(validateExtraTag("School run", []).tag, "School run");
   assert.equal(validateExtraTag("Money", []).tag, "Money");
-  assert.deepEqual(mergeExtraTags(["Pets"], ["pets", "Travel"]), ["Pets", "Travel"]);
+  assert.deepEqual(mergeExtraTags(["Pets", "Kids"], ["pets", "Travel"]), ["Pets", "Travel"]);
 });
 
 test("note text is required and csv escapes formulas", () => {
-  assert.equal(validateNoteInput({ date: "2026-09-26", text: "  ", tag: "Kids", allowedTags: SEED_TAGS }).ok, false);
+  assert.equal(validateNoteInput({ date: "2026-09-26", text: "  ", tag: "F", allowedTags: SEED_TAGS }).ok, false);
   const csv = notesToCsv([{
     date: "2026-09-26",
     tag: "Kids",

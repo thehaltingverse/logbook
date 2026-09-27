@@ -4,7 +4,7 @@ import { decryptJson, encryptJson, generateMasterKey, parseRecoveryKeyInput } fr
 
 test("a note round-trips and is bound to its id", async () => {
   const { key, recoveryKey } = await generateMasterKey();
-  const payload = { date: "2026-09-26", text: "Early pickup", tag: "Kids", important: true };
+  const payload = { date: "2026-09-26", text: "Early pickup", tag: "F", important: true };
   const packed = await encryptJson(key, payload, "note-1");
   assert.deepEqual(await decryptJson(key, packed, "note-1"), payload);
   await assert.rejects(() => decryptJson(key, packed, "note-2"));

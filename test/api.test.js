@@ -79,7 +79,7 @@ test("session cookies expire and reject tampering", async () => {
   assert.equal(await readSessionToken(SECRET, flipped, now), null);
 });
 
-test("authors can change their own notes and nobody else's", async () => {
+test("either person can delete a note and only the author can edit", async () => {
   const target = env();
   const alex = await login(target, "astrocheet4h@gmail.com", "Alex");
   const jordan = await login(target, "second.person@example.com", "Jordan");
@@ -104,16 +104,14 @@ test("authors can change their own notes and nobody else's", async () => {
     body: { ciphertext: "B".repeat(48) },
   });
   assert.equal(edited.status, 403);
-  const removed = await call(target, `/api/notes/${id}`, { method: "DELETE", cookie: jordan.token });
-  assert.equal(removed.status, 403);
   const ownEdit = await call(target, `/api/notes/${id}`, {
     method: "PATCH",
     cookie: alex.token,
     body: { ciphertext: "C".repeat(48) },
   });
   assert.equal(ownEdit.status, 200);
-  const ownDelete = await call(target, `/api/notes/${id}`, { method: "DELETE", cookie: alex.token });
-  assert.equal(ownDelete.status, 200);
+  const removed = await call(target, `/api/notes/${id}`, { method: "DELETE", cookie: jordan.token });
+  assert.equal(removed.status, 200);
   const after = await call(target, "/api/notes", { cookie: alex.token });
   assert.equal((await after.json()).notes.length, 0);
 });
