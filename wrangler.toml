@@ -3,10 +3,10 @@ compatibility_date = "2026-09-26"
 pages_build_output_dir = "./public"
 
 [vars]
-ALLOWED_EMAILS = "astrocheet4h@gmail.com"
+ALLOWED_EMAILS = "astrocheet4h@gmail.com, irina.b.pdx@gmail.com"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "logbook"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "86339370-acf7-4c0c-90cf-ed64680ae628"
 migrations_dir = "migrations"
