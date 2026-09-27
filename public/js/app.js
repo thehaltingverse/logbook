@@ -3,14 +3,19 @@ import { decryptJson, encodeRecoveryKey, encryptJson, formatRecoveryKey, generat
 import {
   SEED_TAGS,
   MAX_TEXT,
+  RETENTION_DAYS,
+  IMPORTANT_LABEL,
   calendarDay,
+  canonicalTag,
   filterNotes,
   formatDayLabel,
   formatTime,
   groupByDate,
   isNotePayload,
+  isWithinRetention,
   mergeExtraTags,
   notesToCsv,
+  retentionStart,
   sortNotes,
   tagsInOrder,
   validateExtraTag,
@@ -189,7 +194,10 @@ async function refreshNotes() {
   if (!response.ok) throw new Error("The log could not be opened.");
   const body = await response.json();
   const notes = [];
+  const expired = [];
+  const rewrites = [];
   let locked = 0;
+  const today = calendarDay(new Date());
   for (const row of body.notes) {
     try {
       const payload = await decryptJson(state.key, row.ciphertext, row.id);
@@ -197,20 +205,45 @@ async function refreshNotes() {
         locked += 1;
         continue;
       }
-      notes.push({
+      const tag = canonicalTag(payload.tag);
+      const note = {
         ...payload,
+        tag,
         important: Boolean(payload.important),
         id: row.id,
         ownerSub: row.ownerSub,
         serverCreatedAt: row.createdAt,
         serverUpdatedAt: row.updatedAt,
-      });
+      };
+      if (!isWithinRetention(note.date, today)) {
+        expired.push(note.id);
+        continue;
+      }
+      notes.push(note);
+      if (tag !== payload.tag && note.ownerSub === state.user?.sub) {
+        rewrites.push({ id: note.id, payload: { ...payload, tag, important: note.important } });
+      }
     } catch {
       locked += 1;
     }
   }
   state.notes = notes;
   state.locked = locked;
+  await Promise.all(expired.map(async (id) => {
+    try {
+      await api(`/api/notes/${id}`, { method: "DELETE" });
+    } catch {
+      // Hidden for this visit. The next open tries the delete again.
+    }
+  }));
+  await Promise.all(rewrites.map(async (item) => {
+    try {
+      const ciphertext = await encryptJson(state.key, item.payload, item.id);
+      await api(`/api/notes/${item.id}`, { method: "PATCH", body: JSON.stringify({ ciphertext }) });
+    } catch {
+      // The renamed tag still shows. The author's next open saves it.
+    }
+  }));
 }
 
 function render({ force = false } = {}) {
@@ -516,6 +549,7 @@ function paintApp() {
       h("div", {}, [
         h("h1", {}, ["Passdown"]),
         h("p", { class: "eyebrow" }, ["Encrypted on this phone"]),
+        h("p", { class: "eyebrow" }, [`Kept for ${RETENTION_DAYS} days`]),
       ]),
       h("button", { class: "button", type: "button", click: openMenu }, ["Menu"]),
     ]),
@@ -531,7 +565,7 @@ function paintApp() {
           paintChips();
           paintList();
         },
-      }, ["IMPT"]),
+      }, [IMPORTANT_LABEL]),
     ]),
     h("p", { class: "banner", id: "banner" }),
     h("div", { id: "log" }),
@@ -606,7 +640,7 @@ function paintList() {
   }), state.extraTags));
   log.replaceChildren();
   if (!visible.length) {
-    log.append(h("p", { class: "empty" }, [state.notes.length ? "Nothing with this filter." : "Nothing to pass down yet."]));
+    log.append(h("p", { class: "empty" }, [state.notes.length ? "Nothing with this filter." : `Nothing from the last ${RETENTION_DAYS} days.`]));
     return;
   }
   for (const group of visible) {
@@ -622,17 +656,15 @@ function noteCard(note) {
   const card = h("article", { class: "note" }, [
     h("div", { class: "note-meta" }, [
       h("span", { class: "tag" }, [note.tag]),
-      note.important ? h("span", { class: "impt-flag" }, ["IMPT"]) : null,
+      note.important ? h("span", { class: "impt-flag" }, [IMPORTANT_LABEL]) : null,
     ]),
     h("p", { class: "note-text" }, [note.text]),
     h("p", { class: "byline" }, [byline]),
   ]);
-  if (mine) {
-    card.append(h("div", { class: "note-actions" }, [
-      h("button", { class: "text-button", type: "button", click: () => openComposer(note) }, ["Edit"]),
-      h("button", { class: "text-button danger", type: "button", click: () => confirmDelete(note) }, ["Delete"]),
-    ]));
-  }
+  card.append(h("div", { class: "note-actions" }, [
+    mine ? h("button", { class: "text-button", type: "button", click: () => openComposer(note) }, ["Edit"]) : null,
+    h("button", { class: "text-button danger", type: "button", click: () => confirmDelete(note) }, ["Delete"]),
+  ]));
   return card;
 }
 
@@ -654,7 +686,7 @@ function composerDialog() {
         h("input", { name: "newTag", type: "text", maxlength: "20", placeholder: "Optional, such as Pets" }),
       ]),
       h("label", { class: "switch" }, [
-        h("span", {}, [h("strong", {}, ["IMPT"]), "Missing this has a real consequence."]),
+        h("span", {}, [h("strong", {}, [IMPORTANT_LABEL]), "Missing this has a real consequence."]),
         h("input", { name: "important", type: "checkbox" }),
       ]),
       h("label", { class: "field" }, [
@@ -692,7 +724,9 @@ async function openComposer(note) {
   const dialog = document.querySelector("#composer");
   const form = document.querySelector("#composer-form");
   document.querySelector("#composer-title").textContent = note ? "Edit note" : "New note";
-  form.date.value = note?.date || calendarDay(new Date());
+  const today = calendarDay(new Date());
+  form.date.min = retentionStart(today);
+  form.date.value = note?.date || today;
   form.text.value = note?.text || "";
   form.important.checked = Boolean(note?.important);
   document.querySelector("#composer-error").textContent = "";
@@ -743,6 +777,7 @@ async function saveComposer(event) {
     text: form.text.value,
     tag: state.draft.tag,
     allowedTags: allowed,
+    today: calendarDay(new Date()),
   });
   if (!parsed.ok) {
     error.textContent = parsed.error;

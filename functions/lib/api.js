@@ -200,16 +200,16 @@ async function handleNote(request, env, id) {
   requireDb(env);
   const user = await requireUser(request, env);
   if (!UUID.test(id)) throw new HttpError(404, "That note is gone.");
+  if (request.method !== "DELETE" && request.method !== "PATCH") throw new HttpError(405, "That request was rejected.");
+  assertSameOrigin(request);
   const existing = await env.DB.prepare("SELECT id, owner_sub FROM notes WHERE id = ?").bind(id).first();
   if (!existing) throw new HttpError(404, "That note is gone.");
-  if (existing.owner_sub !== user.sub) throw new HttpError(403, "Only the author can change this note.");
-  assertSameOrigin(request);
   if (request.method === "DELETE") {
-    const result = await env.DB.prepare("DELETE FROM notes WHERE id = ? AND owner_sub = ?").bind(id, user.sub).run();
+    const result = await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(id).run();
     if (changes(result) !== 1) throw new HttpError(404, "That note is gone.");
     return json({ ok: true });
   }
-  if (request.method !== "PATCH") throw new HttpError(405, "That request was rejected.");
+  if (existing.owner_sub !== user.sub) throw new HttpError(403, "Only the author can change this note.");
   const body = await readJson(request);
   const ciphertext = requireCiphertext(body.ciphertext, 20_000);
   const now = new Date().toISOString();

@@ -108,6 +108,17 @@ h2 {
 
 .chip, .impt-filter { min-height: 40px; }
 
+.impt-filter {
+  justify-self: start;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 999px;
+  padding: 10px 16px;
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+}
+
 .impt-filter[aria-pressed="true"] {
   background: var(--impt);
   border-color: var(--impt);
