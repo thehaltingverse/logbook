@@ -12,14 +12,21 @@ import {
   formatTime,
   groupByDate,
   isNotePayload,
+  isPinned,
   isWithinRetention,
   mergeExtraTags,
+  normalizeMark,
   notesToCsv,
+  partitionThreads,
+  retentionDeletes,
   retentionStart,
   sortNotes,
   tagsInOrder,
+  threadView,
+  toggleMark,
   validateExtraTag,
   validateNoteInput,
+  validateReplyInput,
 } from "./domain.js";
 
 const KEY_STORAGE = "passdown.masterKey.v1";
@@ -36,6 +43,9 @@ const state = {
   extraTags: [],
   catalogUpdatedAt: null,
   notes: [],
+  marks: [],
+  flags: [],
+  openThreads: new Set(),
   locked: 0,
   tag: "All",
   importantOnly: false,
@@ -43,6 +53,7 @@ const state = {
   error: "",
   banner: "",
   draft: null,
+  replyDraft: null,
 };
 
 captureHashKey();
@@ -193,8 +204,8 @@ async function refreshNotes() {
   const response = await api("/api/notes");
   if (!response.ok) throw new Error("The log could not be opened.");
   const body = await response.json();
-  const notes = [];
-  const expired = [];
+  if (!Array.isArray(body.notes)) throw new Error("The log could not be opened.");
+  const decrypted = [];
   const rewrites = [];
   let locked = 0;
   const today = calendarDay(new Date());
@@ -210,16 +221,13 @@ async function refreshNotes() {
         ...payload,
         tag,
         important: Boolean(payload.important),
+        parentId: typeof payload.parentId === "string" ? payload.parentId : "",
         id: row.id,
         ownerSub: row.ownerSub,
         serverCreatedAt: row.createdAt,
         serverUpdatedAt: row.updatedAt,
       };
-      if (!isWithinRetention(note.date, today)) {
-        expired.push(note.id);
-        continue;
-      }
-      notes.push(note);
+      decrypted.push(note);
       if (tag !== payload.tag && note.ownerSub === state.user?.sub) {
         rewrites.push({ id: note.id, payload: { ...payload, tag, important: note.important } });
       }
@@ -227,23 +235,69 @@ async function refreshNotes() {
       locked += 1;
     }
   }
+  const marks = [];
+  for (const row of Array.isArray(body.marks) ? body.marks : []) {
+    try {
+      const payload = await decryptJson(state.key, row.ciphertext, `${row.noteId}\n${row.ownerSub}`);
+      const kind = normalizeMark(payload?.kind);
+      if (!kind) continue;
+      marks.push({
+        noteId: row.noteId,
+        ownerSub: row.ownerSub,
+        kind,
+        name: typeof payload?.name === "string" ? payload.name.trim() : "",
+        updatedAt: row.updatedAt,
+      });
+    } catch {
+      // Leave the row in place. The next open tries again.
+    }
+  }
+  const flags = [];
+  const pinnedIds = [];
+  // Missing flags would look like nothing is pinned and could delete kept notes.
+  const sweep = Array.isArray(body.flags);
+  if (sweep) {
+    for (const row of body.flags) {
+      try {
+        const payload = await decryptJson(state.key, row.ciphertext, `flags:${row.noteId}`);
+        const pinned = payload?.pinned === true;
+        flags.push({ noteId: row.noteId, pinned, updatedAt: row.updatedAt, unreadable: false });
+        if (pinned) pinnedIds.push(row.noteId);
+      } catch {
+        flags.push({ noteId: row.noteId, pinned: true, updatedAt: row.updatedAt, unreadable: true });
+        pinnedIds.push(row.noteId);
+      }
+    }
+  }
+  const expired = retentionDeletes({
+    notes: decrypted,
+    serverIds: body.notes.map((row) => row.id),
+    pinnedIds,
+    today,
+    sweep,
+  });
+  const expiredSet = new Set(expired);
+  const notes = decrypted.filter((note) => !expiredSet.has(note.id));
   state.notes = notes;
+  state.marks = marks.filter((mark) => notes.some((note) => note.id === mark.noteId));
+  state.flags = flags.filter((flag) => notes.some((note) => note.id === flag.noteId));
   state.locked = locked;
-  await Promise.all(expired.map(async (id) => {
+  for (const id of expired) {
     try {
       await api(`/api/notes/${id}`, { method: "DELETE" });
     } catch {
       // Hidden for this visit. The next open tries the delete again.
     }
-  }));
-  await Promise.all(rewrites.map(async (item) => {
+  }
+  for (const item of rewrites) {
+    if (expiredSet.has(item.id)) continue;
     try {
       const ciphertext = await encryptJson(state.key, item.payload, item.id);
       await api(`/api/notes/${item.id}`, { method: "PATCH", body: JSON.stringify({ ciphertext }) });
     } catch {
       // The renamed tag still shows. The author's next open saves it.
     }
-  }));
+  }
 }
 
 function render({ force = false } = {}) {
@@ -573,6 +627,7 @@ function paintApp() {
   ]);
   root.append(shell);
   root.append(composerDialog());
+  root.append(replyDialog());
   root.append(tagDialog());
   root.append(menuDialog());
   root.append(keyDialog());
@@ -634,38 +689,250 @@ function paintList() {
   if (state.locked) messages.push(`${state.locked} note${state.locked === 1 ? "" : "s"} couldn't be opened with this key.`);
   banner.textContent = messages.join(" ");
   const today = calendarDay(new Date());
-  const visible = groupByDate(sortNotes(filterNotes(state.notes, {
+  const { roots, replies } = partitionThreads(state.notes);
+  const visible = groupByDate(sortNotes(filterNotes(roots, {
     tag: state.tag,
     importantOnly: state.importantOnly,
   }), state.extraTags));
   log.replaceChildren();
   if (!visible.length) {
-    log.append(h("p", { class: "empty" }, [state.notes.length ? "Nothing with this filter." : `Nothing from the last ${RETENTION_DAYS} days.`]));
+    log.append(h("p", { class: "empty" }, [roots.length ? "Nothing with this filter." : `Nothing from the last ${RETENTION_DAYS} days.`]));
     return;
   }
   for (const group of visible) {
     log.append(h("h2", { class: "day" }, [formatDayLabel(group.date, today)]));
-    for (const note of group.notes) log.append(noteCard(note));
+    for (const note of group.notes) log.append(noteCard(note, replies));
   }
 }
 
-function noteCard(note) {
+function personLine(note) {
   const mine = note.ownerSub === state.user?.sub;
   const edited = Date.parse(note.serverUpdatedAt) - Date.parse(note.serverCreatedAt) > 2000;
-  const byline = `${mine ? "You" : (note.authorName || "Partner")} · ${formatTime(note.createdAt)}${edited ? " · edited" : ""}`;
+  return `${mine ? "You" : (note.authorName || "Partner")} · ${formatTime(note.createdAt)}${edited ? " · edited" : ""}`;
+}
+
+function noteCard(note, replies) {
+  const mine = note.ownerSub === state.user?.sub;
+  const pinned = isPinned(state.flags, note.id);
+  const view = threadView(note, replies.filter((reply) => reply.parentId === note.id));
+  const expanded = state.openThreads.has(note.id);
   const card = h("article", { class: "note" }, [
     h("div", { class: "note-meta" }, [
       h("span", { class: "tag" }, [note.tag]),
-      note.important ? h("span", { class: "impt-flag" }, [IMPORTANT_LABEL]) : null,
+      h("span", { class: "note-flags" }, [
+        pinned ? h("span", { class: "pin-flag" }, ["Pinned"]) : null,
+        note.important ? h("span", { class: "impt-flag" }, [IMPORTANT_LABEL]) : null,
+      ]),
     ]),
     h("p", { class: "note-text" }, [note.text]),
-    h("p", { class: "byline" }, [byline]),
+    h("p", { class: "byline" }, [personLine(note)]),
+    markControls(note),
+    threadBlock(note, view, expanded),
   ]);
   card.append(h("div", { class: "note-actions" }, [
+    h("button", { class: "text-button", type: "button", click: () => openReplyComposer(note) }, ["Reply"]),
+    h("button", {
+      class: "text-button",
+      type: "button",
+      "aria-pressed": String(pinned),
+      click: () => (pinned ? unpinNote(note) : pinNote(note)),
+    }, [pinned ? "Unpin" : "Pin"]),
     mine ? h("button", { class: "text-button", type: "button", click: () => openComposer(note) }, ["Edit"]) : null,
     h("button", { class: "text-button danger", type: "button", click: () => confirmDelete(note) }, ["Delete"]),
   ]));
   return card;
+}
+
+function markControls(note) {
+  const mine = state.marks.find((mark) => mark.noteId === note.id && mark.ownerSub === state.user?.sub);
+  return h("div", { class: "mark-block" }, [
+    h("div", { class: "mark-row" }, [
+      markButton(note, "ack", "✓ Acknowledged", mine?.kind === "ack"),
+      markButton(note, "question", "? More", mine?.kind === "question"),
+    ]),
+    markSummary(note.id),
+  ]);
+}
+
+function markButton(note, kind, label, pressed) {
+  return h("button", {
+    class: "mark-button",
+    type: "button",
+    "aria-pressed": String(pressed),
+    click: () => saveMark(note, kind),
+  }, [label]);
+}
+
+function markSummary(noteId) {
+  const marks = state.marks
+    .filter((mark) => mark.noteId === noteId)
+    .sort((a, b) => Number(a.ownerSub !== state.user?.sub) - Number(b.ownerSub !== state.user?.sub));
+  if (!marks.length) return null;
+  const line = marks.map((mark) => {
+    const who = mark.ownerSub === state.user?.sub ? "You" : (mark.name || "Partner");
+    const action = mark.kind === "ack" ? "acknowledged" : "asked for more";
+    return `${who} ${action}`;
+  }).join(" · ");
+  return h("p", { class: "mark-line" }, [line]);
+}
+
+function threadBlock(note, view, expanded) {
+  if (!view.replies.length) return null;
+  const shown = expanded ? view.replies : [view.latest];
+  const toggle = view.replies.length > 1
+    ? h("button", {
+      class: "text-button thread-toggle",
+      type: "button",
+      "aria-expanded": String(expanded),
+      click: () => {
+        if (expanded) state.openThreads.delete(note.id);
+        else state.openThreads.add(note.id);
+        paintList();
+      },
+    }, [expanded ? "Hide replies" : `${view.earlierCount} earlier ${view.earlierCount === 1 ? "reply" : "replies"}`])
+    : null;
+  const items = shown.map((reply) => replyCard(note, reply));
+  return h("div", { class: "thread" }, expanded ? [...items, toggle] : [toggle, ...items]);
+}
+
+function replyCard(parent, reply) {
+  const mine = reply.ownerSub === state.user?.sub;
+  return h("div", { class: "reply" }, [
+    h("p", { class: "note-text" }, [reply.text]),
+    h("p", { class: "byline" }, [personLine(reply)]),
+    markControls(reply),
+    h("div", { class: "note-actions" }, [
+      mine ? h("button", { class: "text-button", type: "button", click: () => openReplyComposer(parent, reply) }, ["Edit"]) : null,
+      h("button", { class: "text-button danger", type: "button", click: () => confirmDelete(reply) }, ["Delete"]),
+    ]),
+  ]);
+}
+
+let busy = false;
+
+async function withBusy(work) {
+  if (busy) return;
+  busy = true;
+  try {
+    await work();
+  } finally {
+    busy = false;
+  }
+}
+
+async function saveMark(note, kind) {
+  await withBusy(async () => {
+    const mine = state.marks.find((mark) => mark.noteId === note.id && mark.ownerSub === state.user?.sub);
+    const next = toggleMark(mine?.kind || "", kind);
+    try {
+      if (!next) {
+        const response = await api(`/api/notes/${note.id}/mark`, { method: "DELETE" });
+        if (!response.ok) {
+          const body = await response.json();
+          state.banner = body.error || "That response could not be saved.";
+          paintList();
+          return;
+        }
+      } else {
+        const ciphertext = await encryptJson(
+          state.key,
+          { kind: next, name: String(state.user?.name || "").trim().slice(0, 80) },
+          `${note.id}\n${state.user.sub}`,
+        );
+        const response = await api(`/api/notes/${note.id}/mark`, {
+          method: "PUT",
+          body: JSON.stringify({ ciphertext }),
+        });
+        if (!response.ok) {
+          const body = await response.json();
+          state.banner = body.error || "That response could not be saved.";
+          paintList();
+          return;
+        }
+      }
+      await refreshNotes();
+      state.banner = "";
+      paintList();
+    } catch (error) {
+      state.banner = error.message;
+      paintList();
+    }
+  });
+}
+
+async function pinNote(note) {
+  await withBusy(async () => {
+    try {
+      const ciphertext = await encryptJson(state.key, { pinned: true }, `flags:${note.id}`);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const current = state.flags.find((flag) => flag.noteId === note.id && !flag.unreadable);
+        const response = await api(`/api/notes/${note.id}/flags`, {
+          method: "PUT",
+          body: JSON.stringify({ ciphertext, baseUpdatedAt: current?.updatedAt ?? null }),
+        });
+        if (response.status === 409) {
+          const body = await response.json();
+          if (!body.ciphertext) {
+            state.banner = "Could not pin this note.";
+            paintList();
+            return;
+          }
+          try {
+            const data = await decryptJson(state.key, body.ciphertext, `flags:${note.id}`);
+            if (data?.pinned === true) break;
+          } catch {
+            break;
+          }
+          state.flags = state.flags.filter((flag) => flag.noteId !== note.id);
+          state.flags.push({ noteId: note.id, pinned: false, updatedAt: body.updatedAt, unreadable: false });
+          continue;
+        }
+        if (!response.ok) {
+          const body = await response.json();
+          state.banner = body.error || "Could not pin this note.";
+          paintList();
+          return;
+        }
+        break;
+      }
+      await refreshNotes();
+      state.banner = "";
+      paintList();
+    } catch (error) {
+      state.banner = error.message;
+      paintList();
+    }
+  });
+}
+
+function unpinNote(note) {
+  const today = calendarDay(new Date());
+  if (!isWithinRetention(note.date, today)) {
+    const replies = state.notes.some((item) => item.parentId === note.id);
+    const text = replies
+      ? "Unpin this note? It is older than 7 days, so unpinning deletes it and its replies for both of you."
+      : "Unpin this note? It is older than 7 days, so unpinning deletes it for both of you.";
+    askConfirm(text, () => removeNote(note), "Unpin and delete");
+    return;
+  }
+  withBusy(async () => {
+    try {
+      const response = await api(`/api/notes/${note.id}/flags`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json();
+        state.banner = body.error || "Could not unpin this note.";
+        paintList();
+        return;
+      }
+      await refreshNotes();
+      state.banner = "";
+      paintChips();
+      paintList();
+    } catch (error) {
+      state.banner = error.message;
+      paintList();
+    }
+  });
 }
 
 function composerDialog() {
@@ -714,6 +981,7 @@ async function openComposer(note) {
     mode: "edit",
     id: note.id,
     tag: note.tag,
+    date: note.date,
     createdAt: note.createdAt,
     authorName: note.authorName,
     authorEmail: note.authorEmail,
@@ -725,7 +993,9 @@ async function openComposer(note) {
   const form = document.querySelector("#composer-form");
   document.querySelector("#composer-title").textContent = note ? "Edit note" : "New note";
   const today = calendarDay(new Date());
-  form.date.min = retentionStart(today);
+  const oldest = retentionStart(today);
+  const keepDate = note && isPinned(state.flags, note.id) && !isWithinRetention(note.date, today);
+  form.date.min = keepDate ? note.date : oldest;
   form.date.value = note?.date || today;
   form.text.value = note?.text || "";
   form.important.checked = Boolean(note?.important);
@@ -772,12 +1042,18 @@ async function saveComposer(event) {
     }
   }
   const allowed = tagsInOrder(state.extraTags, state.notes);
+  const today = calendarDay(new Date());
+  const keepDate = state.draft.mode === "edit"
+    && isPinned(state.flags, state.draft.id)
+    && state.draft.date
+    && !isWithinRetention(state.draft.date, today);
   const parsed = validateNoteInput({
     date: form.date.value,
     text: form.text.value,
     tag: state.draft.tag,
     allowedTags: allowed,
-    today: calendarDay(new Date()),
+    today,
+    existingDate: keepDate ? state.draft.date : "",
   });
   if (!parsed.ok) {
     error.textContent = parsed.error;
@@ -825,6 +1101,109 @@ async function saveComposer(event) {
   } catch (err) {
     if (error) error.textContent = err.message;
   }
+}
+
+function replyDialog() {
+  return h("dialog", { class: "sheet", id: "reply-composer" }, [
+    h("form", { id: "reply-form", submit: saveReply }, [
+      h("div", { class: "sheet-bar" }, [
+        h("button", { class: "text-button", type: "button", click: () => document.querySelector("#reply-composer").close() }, ["Cancel"]),
+        h("h2", { id: "reply-title" }, ["Reply"]),
+        h("button", { class: "text-button end", type: "submit" }, ["Save"]),
+      ]),
+      h("label", { class: "field" }, [
+        h("span", {}, ["Reply"]),
+        h("textarea", { name: "text", maxlength: String(MAX_TEXT), required: "true", input: updateReplyCount }),
+      ]),
+      h("p", { class: "count", id: "reply-count" }, [`0/${MAX_TEXT}`]),
+      h("p", { class: "form-error", id: "reply-error" }),
+    ]),
+  ]);
+}
+
+function updateReplyCount(event) {
+  const count = document.querySelector("#reply-count");
+  if (count) count.textContent = `${event.currentTarget.value.length}/${MAX_TEXT}`;
+}
+
+function openReplyComposer(parent, reply) {
+  state.replyDraft = reply ? {
+    mode: "edit",
+    id: reply.id,
+    parentId: parent.id,
+    date: reply.date,
+    tag: reply.tag,
+    createdAt: reply.createdAt,
+    authorName: reply.authorName,
+    authorEmail: reply.authorEmail,
+  } : {
+    mode: "new",
+    parentId: parent.id,
+  };
+  const dialog = document.querySelector("#reply-composer");
+  const form = document.querySelector("#reply-form");
+  document.querySelector("#reply-title").textContent = reply ? "Edit reply" : "Reply";
+  form.text.value = reply?.text || "";
+  document.querySelector("#reply-error").textContent = "";
+  document.querySelector("#reply-count").textContent = `${form.text.value.length}/${MAX_TEXT}`;
+  dialog.showModal();
+}
+
+async function saveReply(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const error = document.querySelector("#reply-error");
+  const parent = state.notes.find((note) => note.id === state.replyDraft?.parentId);
+  const parsed = validateReplyInput({ text: form.text.value, parent });
+  if (!parsed.ok) {
+    error.textContent = parsed.error;
+    return;
+  }
+  const editing = state.replyDraft.mode === "edit";
+  const payload = {
+    date: editing ? state.replyDraft.date : parent.date,
+    text: parsed.text,
+    tag: editing ? state.replyDraft.tag : parent.tag,
+    important: false,
+    authorName: editing ? state.replyDraft.authorName : state.user.name,
+    authorEmail: editing ? state.replyDraft.authorEmail : state.user.email,
+    createdAt: editing ? state.replyDraft.createdAt : new Date().toISOString(),
+    parentId: parent.id,
+  };
+  await withBusy(async () => {
+    try {
+      if (editing) {
+        const ciphertext = await encryptJson(state.key, payload, state.replyDraft.id);
+        const response = await api(`/api/notes/${state.replyDraft.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ ciphertext }),
+        });
+        if (!response.ok) {
+          const body = await response.json();
+          error.textContent = body.error || "That reply could not be saved.";
+          return;
+        }
+      } else {
+        const id = crypto.randomUUID();
+        const ciphertext = await encryptJson(state.key, payload, id);
+        const response = await api("/api/notes", {
+          method: "POST",
+          body: JSON.stringify({ id, ciphertext }),
+        });
+        if (!response.ok) {
+          const body = await response.json();
+          error.textContent = body.error || "That reply could not be saved.";
+          return;
+        }
+      }
+      await refreshNotes();
+      document.querySelector("#reply-composer").close();
+      state.banner = "";
+      paintList();
+    } catch (err) {
+      if (error) error.textContent = err.message;
+    }
+  });
 }
 
 function tagDialog() {
@@ -908,9 +1287,31 @@ function showRecovery() {
   dialog.showModal();
 }
 
+function exportNotes() {
+  const { roots, replies } = partitionThreads(state.notes);
+  const rows = [];
+  for (const root of sortNotes(roots, state.extraTags)) {
+    rows.push(decorateExport(root));
+    const view = threadView(root, replies.filter((reply) => reply.parentId === root.id));
+    for (const reply of view.replies) rows.push(decorateExport(reply));
+  }
+  return rows;
+}
+
+function decorateExport(note) {
+  const marks = state.marks.filter((mark) => mark.noteId === note.id);
+  const nameFor = (mark) => (mark.ownerSub === state.user?.sub ? (state.user.name || "You") : (mark.name || "Partner"));
+  return {
+    ...note,
+    pinned: isPinned(state.flags, note.id),
+    ack: marks.filter((mark) => mark.kind === "ack").map(nameFor).join("; "),
+    question: marks.filter((mark) => mark.kind === "question").map(nameFor).join("; "),
+  };
+}
+
 async function exportCsv() {
   document.querySelector("#menu")?.close();
-  const notes = sortNotes(state.notes, state.extraTags);
+  const notes = exportNotes();
   const file = new File([notesToCsv(notes)], `passdown-${calendarDay(new Date())}.csv`, { type: "text/csv" });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -965,7 +1366,27 @@ function askConfirm(text, action, confirmLabel = "Continue") {
 }
 
 function confirmDelete(note) {
-  askConfirm("Delete this note? This removes it for both of you.", async () => {
+  const replies = state.notes.some((item) => item.parentId === note.id);
+  const text = replies
+    ? "Delete this note and its replies? This removes them for both of you."
+    : note.parentId
+      ? "Delete this reply? This removes it for both of you."
+      : "Delete this note? This removes it for both of you.";
+  askConfirm(text, () => removeNote(note), "Delete");
+}
+
+async function removeNote(note) {
+  const replies = state.notes.filter((item) => item.parentId === note.id);
+  try {
+    for (const reply of replies) {
+      const response = await api(`/api/notes/${reply.id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json();
+        state.banner = body.error || "That note could not be deleted.";
+        paintList();
+        return;
+      }
+    }
     const response = await api(`/api/notes/${note.id}`, { method: "DELETE" });
     if (!response.ok) {
       const body = await response.json();
@@ -973,10 +1394,15 @@ function confirmDelete(note) {
       paintList();
       return;
     }
+    state.openThreads.delete(note.id);
     await refreshNotes();
+    state.banner = "";
     paintChips();
     paintList();
-  }, "Delete");
+  } catch (error) {
+    state.banner = error.message;
+    paintList();
+  }
 }
 
 function forgetKey() {

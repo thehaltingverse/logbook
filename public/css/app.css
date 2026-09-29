@@ -149,6 +149,12 @@ h2 {
   margin-bottom: 6px;
 }
 
+.note-flags {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .tag {
   font-size: 0.78rem;
   letter-spacing: 0.06em;
@@ -177,7 +183,58 @@ h2 {
   margin-top: 8px;
 }
 
-.note-actions { display: flex; gap: 8px; margin-top: 4px; }
+.note-actions, .mark-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.mark-button {
+  border: 1px solid var(--line);
+  background: transparent;
+  border-radius: 999px;
+  min-height: 44px;
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
+.mark-button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--card);
+  border-color: var(--ink);
+}
+
+.mark-line {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 4px;
+}
+
+.pin-flag {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.thread {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.reply {
+  background: var(--paper);
+  border-radius: 12px;
+  padding: 10px 12px 6px;
+}
+
+.reply .note-text { font-size: 1.05rem; }
+
+.thread-toggle { justify-self: start; padding-left: 0; }
 
 .text-button {
   background: transparent;

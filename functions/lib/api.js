@@ -161,10 +161,48 @@ async function listNotes(db) {
   }));
 }
 
+async function listMarks(db) {
+  const { results } = await db.prepare(
+    "SELECT note_id, owner_sub, ciphertext, updated_at FROM note_marks ORDER BY note_id ASC, owner_sub ASC",
+  ).all();
+  return (results || []).map((row) => ({
+    noteId: row.note_id,
+    ownerSub: row.owner_sub,
+    ciphertext: row.ciphertext,
+    updatedAt: row.updated_at,
+  }));
+}
+
+async function listFlags(db) {
+  const { results } = await db.prepare(
+    "SELECT note_id, ciphertext, updated_at FROM note_flags ORDER BY note_id ASC",
+  ).all();
+  return (results || []).map((row) => ({
+    noteId: row.note_id,
+    ciphertext: row.ciphertext,
+    updatedAt: row.updated_at,
+  }));
+}
+
+async function noteExists(db, id) {
+  return db.prepare("SELECT id FROM notes WHERE id = ?").bind(id).first();
+}
+
+async function deleteNoteExtras(db, id) {
+  await db.prepare("DELETE FROM note_marks WHERE note_id = ?").bind(id).run();
+  await db.prepare("DELETE FROM note_flags WHERE note_id = ?").bind(id).run();
+}
+
 async function handleNotes(request, env) {
   requireDb(env);
   const user = await requireUser(request, env);
-  if (request.method === "GET") return json({ notes: await listNotes(env.DB) });
+  if (request.method === "GET") {
+    return json({
+      notes: await listNotes(env.DB),
+      marks: await listMarks(env.DB),
+      flags: await listFlags(env.DB),
+    });
+  }
   if (request.method !== "POST") throw new HttpError(405, "That request was rejected.");
   assertSameOrigin(request);
   const body = await readJson(request);
@@ -207,6 +245,7 @@ async function handleNote(request, env, id) {
   if (request.method === "DELETE") {
     const result = await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(id).run();
     if (changes(result) !== 1) throw new HttpError(404, "That note is gone.");
+    await deleteNoteExtras(env.DB, id);
     return json({ ok: true });
   }
   if (existing.owner_sub !== user.sub) throw new HttpError(403, "Only the author can change this note.");
@@ -218,6 +257,81 @@ async function handleNote(request, env, id) {
   ).bind(ciphertext, now, id, user.sub).run();
   if (changes(result) !== 1) throw new HttpError(404, "That note is gone.");
   return json({ note: { id, ownerSub: user.sub, ciphertext, updatedAt: now } });
+}
+
+function flagJson(row, status = 200) {
+  return json({ ciphertext: row.ciphertext, updatedAt: row.updated_at }, status);
+}
+
+async function handleMark(request, env, id) {
+  requireDb(env);
+  const user = await requireUser(request, env);
+  if (!UUID.test(id)) throw new HttpError(404, "That note is gone.");
+  if (request.method !== "PUT" && request.method !== "DELETE") throw new HttpError(405, "That request was rejected.");
+  assertSameOrigin(request);
+  if (!(await noteExists(env.DB, id))) throw new HttpError(404, "That note is gone.");
+  if (request.method === "DELETE") {
+    await env.DB.prepare("DELETE FROM note_marks WHERE note_id = ? AND owner_sub = ?").bind(id, user.sub).run();
+    return json({ ok: true });
+  }
+  const body = await readJson(request);
+  const ciphertext = requireCiphertext(body.ciphertext, 2_000);
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO note_marks (note_id, owner_sub, ciphertext, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(note_id, owner_sub) DO UPDATE SET ciphertext = excluded.ciphertext, updated_at = excluded.updated_at`,
+  ).bind(id, user.sub, ciphertext, now, now).run();
+  return json({ ok: true });
+}
+
+async function handleFlags(request, env, id) {
+  requireDb(env);
+  await requireUser(request, env);
+  if (!UUID.test(id)) throw new HttpError(404, "That note is gone.");
+  if (request.method !== "PUT" && request.method !== "DELETE") throw new HttpError(405, "That request was rejected.");
+  assertSameOrigin(request);
+  if (!(await noteExists(env.DB, id))) throw new HttpError(404, "That note is gone.");
+  if (request.method === "DELETE") {
+    await env.DB.prepare("DELETE FROM note_flags WHERE note_id = ?").bind(id).run();
+    return json({ ok: true });
+  }
+  const body = await readJson(request);
+  const ciphertext = requireCiphertext(body.ciphertext, 2_000);
+  const baseUpdatedAt = body.baseUpdatedAt ?? null;
+  if (baseUpdatedAt !== null && typeof baseUpdatedAt !== "string") {
+    throw new HttpError(400, "Could not pin this note.");
+  }
+  const now = new Date().toISOString();
+  const current = await env.DB.prepare(
+    "SELECT note_id, ciphertext, updated_at FROM note_flags WHERE note_id = ?",
+  ).bind(id).first();
+  if (baseUpdatedAt === null) {
+    if (current) return flagJson(current, 409);
+    try {
+      await env.DB.prepare(
+        "INSERT INTO note_flags (note_id, ciphertext, updated_at) VALUES (?, ?, ?)",
+      ).bind(id, ciphertext, now).run();
+    } catch {
+      const latest = await env.DB.prepare(
+        "SELECT note_id, ciphertext, updated_at FROM note_flags WHERE note_id = ?",
+      ).bind(id).first();
+      if (latest) return flagJson(latest, 409);
+      throw new HttpError(500, "Could not pin this note.");
+    }
+    return json({ updatedAt: now });
+  }
+  const result = await env.DB.prepare(
+    "UPDATE note_flags SET ciphertext = ?, updated_at = ? WHERE note_id = ? AND updated_at = ?",
+  ).bind(ciphertext, now, id, baseUpdatedAt).run();
+  if (changes(result) !== 1) {
+    const latest = await env.DB.prepare(
+      "SELECT note_id, ciphertext, updated_at FROM note_flags WHERE note_id = ?",
+    ).bind(id).first();
+    if (!latest) throw new HttpError(404, "That note is gone.");
+    return flagJson(latest, 409);
+  }
+  return json({ updatedAt: now });
 }
 
 async function handleCatalog(request, env) {
@@ -281,6 +395,12 @@ export async function handleRequest(request, env) {
       return json({ user });
     }
     if (parts[1] === "notes" && parts.length === 2) return await handleNotes(request, env);
+    if (parts[1] === "notes" && parts.length === 4 && parts[3] === "mark") {
+      return await handleMark(request, env, parts[2]);
+    }
+    if (parts[1] === "notes" && parts.length === 4 && parts[3] === "flags") {
+      return await handleFlags(request, env, parts[2]);
+    }
     if (parts[1] === "notes" && parts.length === 3) return await handleNote(request, env, parts[2]);
     if (parts[1] === "catalog" && parts.length === 2) return await handleCatalog(request, env);
     return json({ error: "Not found." }, 404);

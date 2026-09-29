@@ -4,6 +4,9 @@ export const MAX_TEXT = 400;
 export const MAX_EXTRA_TAGS = 24;
 export const RETENTION_DAYS = 7;
 export const IMPORTANT_LABEL = "IMPORTANT";
+export const MARK_KINDS = ["ack", "question"];
+
+const PARENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const RESERVED = new Set(["all", "impt", "important", "new", "new tag"]);
 const LEGACY_TAGS = new Map([["kids", "F"]]);
@@ -163,9 +166,10 @@ export function groupByDate(sortedNotes) {
   return groups;
 }
 
-export function validateNoteInput({ date, text, tag, allowedTags, today }) {
+export function validateNoteInput({ date, text, tag, allowedTags, today, existingDate = "" }) {
   if (!isRealDate(date)) return { ok: false, error: "Choose a date." };
-  if (today && !isWithinRetention(date, today)) return { ok: false, error: "That date is older than 7 days." };
+  const keepExisting = existingDate && date === existingDate && today && !isWithinRetention(existingDate, today);
+  if (today && !isWithinRetention(date, today) && !keepExisting) return { ok: false, error: "That date is older than 7 days." };
   const body = String(text || "").trim();
   if (!body) return { ok: false, error: "Write a short note." };
   if (body.length > MAX_TEXT) return { ok: false, error: "Keep the note under 400 characters." };
@@ -184,7 +188,7 @@ function csvCell(value) {
 }
 
 export function notesToCsv(notes) {
-  const lines = ["date,tag,important,author,text,created"];
+  const lines = ["date,tag,important,author,text,created,parent,pinned,ack,question"];
   for (const note of notes) {
     lines.push([
       note.date,
@@ -193,6 +197,10 @@ export function notesToCsv(notes) {
       note.authorName || "",
       note.text || "",
       note.createdAt || "",
+      note.parentId || "",
+      note.pinned ? "yes" : "no",
+      note.ack || "",
+      note.question || "",
     ].map(csvCell).join(","));
   }
   return `${lines.join("\n")}\n`;
@@ -204,5 +212,88 @@ export function isNotePayload(value) {
     && isRealDate(value.date)
     && typeof value.text === "string"
     && typeof value.tag === "string"
-    && typeof value.createdAt === "string";
+    && typeof value.createdAt === "string"
+    && (value.parentId == null || value.parentId === "" || PARENT_ID.test(value.parentId));
+}
+
+export function normalizeMark(kind) {
+  return MARK_KINDS.includes(kind) ? kind : "";
+}
+
+export function toggleMark(current, next) {
+  const kind = normalizeMark(next);
+  if (!kind) return "";
+  return normalizeMark(current) === kind ? "" : kind;
+}
+
+export function marksByNote(marks) {
+  const grouped = new Map();
+  for (const mark of marks || []) {
+    if (!mark?.noteId || !normalizeMark(mark.kind)) continue;
+    const list = grouped.get(mark.noteId) || [];
+    list.push(mark);
+    grouped.set(mark.noteId, list);
+  }
+  return grouped;
+}
+
+export function isPinned(flags, noteId) {
+  return (flags || []).some((flag) => flag.noteId === noteId && flag.pinned === true);
+}
+
+export function shouldKeepNote(note, today, pinned) {
+  return Boolean(pinned) || isWithinRetention(note?.date, today);
+}
+
+export function partitionThreads(notes, knownIds = null) {
+  const ids = knownIds instanceof Set ? knownIds : new Set(knownIds || (notes || []).map((note) => note.id));
+  const roots = [];
+  const replies = [];
+  const orphans = [];
+  for (const note of notes || []) {
+    if (!note?.parentId) {
+      roots.push(note);
+      continue;
+    }
+    if (ids.has(note.parentId)) replies.push(note);
+    else orphans.push(note);
+  }
+  return { roots, replies, orphans };
+}
+
+export function threadView(parent, replies) {
+  const ordered = [...(replies || [])].sort((a, b) => {
+    if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return {
+    parent,
+    replies: ordered,
+    latest: ordered.at(-1) || null,
+    earlierCount: Math.max(0, ordered.length - 1),
+  };
+}
+
+export function validateReplyInput({ text, parent }) {
+  if (!parent?.id || parent.parentId) return { ok: false, error: "Reply to the original note." };
+  const body = String(text || "").trim();
+  if (!body) return { ok: false, error: "Write a short reply." };
+  if (body.length > MAX_TEXT) return { ok: false, error: "Keep the reply under 400 characters." };
+  return { ok: true, text: body };
+}
+
+export function retentionDeletes({ notes, serverIds, pinnedIds, today, sweep }) {
+  if (!sweep) return [];
+  const known = serverIds instanceof Set ? serverIds : new Set(serverIds || []);
+  const pinned = pinnedIds instanceof Set ? pinnedIds : new Set(pinnedIds || []);
+  const { roots, replies, orphans } = partitionThreads(notes, known);
+  const ids = orphans.map((note) => note.id);
+  for (const root of roots) {
+    if (shouldKeepNote(root, today, pinned.has(root.id))) continue;
+    for (const reply of replies) {
+      if (reply.parentId === root.id) ids.push(reply.id);
+    }
+    ids.push(root.id);
+  }
+  return ids;
 }

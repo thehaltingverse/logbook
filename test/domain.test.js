@@ -11,11 +11,20 @@ import {
   isWithinRetention,
   mergeExtraTags,
   notesToCsv,
+  isPinned,
+  marksByNote,
+  normalizeMark,
+  partitionThreads,
+  retentionDeletes,
   retentionStart,
+  shouldKeepNote,
   sortNotes,
   tagsInOrder,
+  threadView,
+  toggleMark,
   validateExtraTag,
   validateNoteInput,
+  validateReplyInput,
 } from "../public/js/domain.js";
 
 test("seed tags are the family list without Money", () => {
@@ -113,6 +122,104 @@ test("note text is required and csv escapes formulas", () => {
     text: '=HYPERLINK("http://example")',
     createdAt: "2026-09-26T15:00:00.000Z",
   }]);
-  assert.match(csv, /date,tag,important,author,text,created/);
+  assert.match(csv, /date,tag,important,author,text,created,parent,pinned,ack,question/);
   assert.match(csv, /"'=HYPERLINK/);
+  assert.match(csv, /,no,,$/m);
+});
+
+test("a pinned note can keep its original date and a different old date cannot", () => {
+  const today = "2026-09-27";
+  const kept = validateNoteInput({
+    date: "2026-09-01",
+    text: "Still true",
+    tag: "F",
+    allowedTags: SEED_TAGS,
+    today,
+    existingDate: "2026-09-01",
+  });
+  assert.equal(kept.ok, true);
+  const moved = validateNoteInput({
+    date: "2026-09-02",
+    text: "Still true",
+    tag: "F",
+    allowedTags: SEED_TAGS,
+    today,
+    existingDate: "2026-09-01",
+  });
+  assert.equal(moved.ok, false);
+  const current = validateNoteInput({
+    date: "2026-09-26",
+    text: "Moved up",
+    tag: "F",
+    allowedTags: SEED_TAGS,
+    today,
+    existingDate: "2026-09-01",
+  });
+  assert.equal(current.ok, true);
+});
+
+test("one person has one mark, and it clears or switches", () => {
+  assert.equal(normalizeMark("ack"), "ack");
+  assert.equal(normalizeMark("nope"), "");
+  assert.equal(toggleMark("", "ack"), "ack");
+  assert.equal(toggleMark("ack", "ack"), "");
+  assert.equal(toggleMark("ack", "question"), "question");
+  assert.equal(toggleMark("question", "nope"), "");
+  const grouped = marksByNote([
+    { noteId: "a", kind: "ack" },
+    { noteId: "a", kind: "question" },
+    { noteId: "b", kind: "nope" },
+  ]);
+  assert.equal(grouped.get("a").length, 2);
+  assert.equal(grouped.has("b"), false);
+});
+
+test("pin keeps a note past day 7 and threads stay with the parent", () => {
+  const today = "2026-09-27";
+  const old = "2026-09-01";
+  assert.equal(shouldKeepNote({ date: old }, today, true), true);
+  assert.equal(shouldKeepNote({ date: old }, today, false), false);
+  assert.equal(shouldKeepNote({ date: today }, today, false), true);
+  assert.equal(isPinned([{ noteId: "pinned", pinned: true }, { noteId: "open", pinned: false }], "pinned"), true);
+  const parts = partitionThreads([
+    { id: "root" },
+    { id: "reply", parentId: "root" },
+    { id: "hidden", parentId: "locked-parent" },
+    { id: "orphan", parentId: "gone" },
+  ], ["root", "reply", "hidden", "orphan", "locked-parent"]);
+  assert.deepEqual(parts.roots.map((note) => note.id), ["root"]);
+  assert.deepEqual(parts.replies.map((note) => note.id), ["reply", "hidden"]);
+  assert.deepEqual(parts.orphans.map((note) => note.id), ["orphan"]);
+  const view = threadView({ id: "root" }, [
+    { id: "b", createdAt: "2026-09-02T00:00:00.000Z" },
+    { id: "a", createdAt: "2026-09-01T00:00:00.000Z" },
+    { id: "c", createdAt: "2026-09-02T00:00:00.000Z" },
+  ]);
+  assert.deepEqual(view.replies.map((note) => note.id), ["a", "b", "c"]);
+  assert.equal(view.latest.id, "c");
+  assert.equal(view.earlierCount, 2);
+  const ids = retentionDeletes({
+    notes: [
+      { id: "old-root", date: old },
+      { id: "child", date: old, parentId: "old-root" },
+      { id: "pinned", date: old },
+      { id: "pinned-child", date: old, parentId: "pinned" },
+      { id: "fresh", date: today },
+      { id: "orphan", date: today, parentId: "missing" },
+    ],
+    serverIds: ["old-root", "child", "pinned", "pinned-child", "fresh", "orphan"],
+    pinnedIds: ["pinned"],
+    today,
+    sweep: true,
+  });
+  assert.deepEqual(ids, ["orphan", "child", "old-root"]);
+  assert.deepEqual(retentionDeletes({ notes: [{ id: "old-root", date: old }], serverIds: ["old-root"], pinnedIds: [], today, sweep: false }), []);
+});
+
+test("replies are short text on the original note", () => {
+  const parent = { id: "root" };
+  assert.equal(validateReplyInput({ text: "  Pickup at 3.  ", parent }).text, "Pickup at 3.");
+  assert.equal(validateReplyInput({ text: " ", parent }).ok, false);
+  assert.equal(validateReplyInput({ text: "x".repeat(401), parent }).ok, false);
+  assert.equal(validateReplyInput({ text: "Nested", parent: { id: "reply", parentId: "root" } }).ok, false);
 });
