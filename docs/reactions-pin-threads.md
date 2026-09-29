@@ -1,6 +1,6 @@
 # Plan: marks, pins, and threads
 
-This is a build plan only. It does not change the log yet. Defaults below are the ones to code if no answer comes back on the open questions.
+These decisions are confirmed and implemented. Each person has one mark at a time. The question mark only asks for more. Both names show. Either person can pin. Unpin deletes a note only after the 7-day window, and Delete still works on a pin. Pinned notes stay on their calendar day. Replies are short text up to 400 characters, one level deep, and they live only with the parent. The thread expands on the card. Marks work on replies. Only the original note can be pinned. The author can keep editing a pinned note after day 7, with its original date.
 
 ## What the app does today
 
@@ -26,9 +26,9 @@ That permission split is why these three features cannot be fields on the note p
 10. The author can still edit a pinned note after day 7. The original date stays. The date field cannot be moved outside the window to dodge retention.
 11. Mark kind, pin state, and parent id stay inside ciphertext. Cloudflare does not learn them.
 
-## Open questions
+## Decisions
 
-These change the steps marked "depends" later in this doc.
+Confirmed before implementation:
 
 1. Can one person put both a check and a question on the same note, or only one?
 2. Is the question mark only a request for the other person to say more, or should it also open the thread?

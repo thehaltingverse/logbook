@@ -144,6 +144,89 @@ test("tag catalog create conflicts instead of overwriting", async () => {
   assert.equal(saved.status, 200);
 });
 
+test("marks belong to each person and a pin conflicts instead of overwriting", async () => {
+  const target = env();
+  const alex = await login(target, "astrocheet4h@gmail.com", "Alex");
+  const jordan = await login(target, "second.person@example.com", "Jordan");
+  const id = crypto.randomUUID();
+  const created = await call(target, "/api/notes", {
+    method: "POST",
+    cookie: alex.token,
+    body: { id, ciphertext: "A".repeat(48) },
+  });
+  assert.equal(created.status, 201);
+  const missing = await call(target, `/api/notes/${crypto.randomUUID()}/mark`, {
+    method: "PUT",
+    cookie: jordan.token,
+    body: { ciphertext: "M".repeat(40) },
+  });
+  assert.equal(missing.status, 404);
+  const jordanMark = await call(target, `/api/notes/${id}/mark`, {
+    method: "PUT",
+    cookie: jordan.token,
+    body: { ciphertext: "J".repeat(40) },
+  });
+  assert.equal(jordanMark.status, 200);
+  const alexMark = await call(target, `/api/notes/${id}/mark`, {
+    method: "PUT",
+    cookie: alex.token,
+    body: { ciphertext: "A".repeat(40) },
+  });
+  assert.equal(alexMark.status, 200);
+  const jordanAgain = await call(target, `/api/notes/${id}/mark`, {
+    method: "PUT",
+    cookie: jordan.token,
+    body: { ciphertext: "K".repeat(40) },
+  });
+  assert.equal(jordanAgain.status, 200);
+  const pinned = await call(target, `/api/notes/${id}/flags`, {
+    method: "PUT",
+    cookie: jordan.token,
+    body: { ciphertext: "P".repeat(40), baseUpdatedAt: null },
+  });
+  assert.equal(pinned.status, 200);
+  const clash = await call(target, `/api/notes/${id}/flags`, {
+    method: "PUT",
+    cookie: alex.token,
+    body: { ciphertext: "Q".repeat(40), baseUpdatedAt: null },
+  });
+  assert.equal(clash.status, 409);
+  const current = await clash.json();
+  assert.equal(current.ciphertext, "P".repeat(40));
+  const stale = await call(target, `/api/notes/${id}/flags`, {
+    method: "PUT",
+    cookie: alex.token,
+    body: { ciphertext: "Q".repeat(40), baseUpdatedAt: "1999-01-01T00:00:00.000Z" },
+  });
+  assert.equal(stale.status, 409);
+  const saved = await call(target, `/api/notes/${id}/flags`, {
+    method: "PUT",
+    cookie: alex.token,
+    body: { ciphertext: "Q".repeat(40), baseUpdatedAt: current.updatedAt },
+  });
+  assert.equal(saved.status, 200);
+  const listed = await call(target, "/api/notes", { cookie: alex.token });
+  const body = await listed.json();
+  assert.equal(body.marks.length, 2);
+  assert.equal(body.marks.find((mark) => mark.ownerSub === alex.body.user.sub).ciphertext, "A".repeat(40));
+  assert.equal(body.marks.find((mark) => mark.ownerSub === jordan.body.user.sub).ciphertext, "K".repeat(40));
+  assert.equal(body.flags.length, 1);
+  assert.equal(body.flags[0].ciphertext, "Q".repeat(40));
+  const cleared = await call(target, `/api/notes/${id}/mark`, { method: "DELETE", cookie: jordan.token });
+  assert.equal(cleared.status, 200);
+  const afterClear = await call(target, "/api/notes", { cookie: alex.token });
+  const remaining = (await afterClear.json()).marks;
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].ownerSub, alex.body.user.sub);
+  const removed = await call(target, `/api/notes/${id}`, { method: "DELETE", cookie: jordan.token });
+  assert.equal(removed.status, 200);
+  const after = await call(target, "/api/notes", { cookie: alex.token });
+  const empty = await after.json();
+  assert.equal(empty.notes.length, 0);
+  assert.equal(empty.marks.length, 0);
+  assert.equal(empty.flags.length, 0);
+});
+
 test("google sign-in checks the signature, audience, and verified email", async () => {
   const pair = await crypto.subtle.generateKey(
     { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },

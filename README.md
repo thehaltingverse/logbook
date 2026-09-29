@@ -1,6 +1,6 @@
 # Passdown
 
-A private log for two people. Each note has a date, a short text, one tag, and an optional IMPORTANT marker. Notes are encrypted in the browser before they are saved, so the host stores only ciphertext. The log keeps the last 7 days in Pacific Time. Older notes are deleted when the log is opened.
+A private log for two people. Each note has a date, a short text, one tag, and an optional IMPORTANT marker. Either person can acknowledge a note or ask for more, pin it so it stays past the 7-day window, or add a short reply. Notes are encrypted in the browser before they are saved, so the host stores only ciphertext. The log keeps the last 7 days in Pacific Time. Older notes are deleted when the log is opened, unless they are pinned. Unpinning a note that is already older than 7 days deletes it.
 
 Sign-in is Google, limited to the addresses in `ALLOWED_EMAILS`. The second address can be added when you have it. Dates use Pacific Time.
 
@@ -8,7 +8,7 @@ Sign-in is Google, limited to the addresses in `ALLOWED_EMAILS`. The second addr
 
 F, House, Ops, Errands, and Reminders are built in. Notes saved under Kids show as F, and the author’s next visit stores that name. Either person can add a short ad hoc tag. IMPORTANT is a marker on a note, not a tag, and the filter can combine it with a tag.
 
-Only the author can edit a note. Either person can delete any note. Export CSV from the menu builds the file on the phone.
+Only the author can edit a note. Either person can delete any note, including a pinned one. A reply is a short text under that note, up to 400 characters, and it stays only as long as the note does. The list shows the note and the newest reply until the thread is expanded. Export CSV from the menu builds the file on the phone.
 
 ## Recovery key
 
@@ -44,4 +44,4 @@ Do not set `ALLOW_DEV_LOGIN` on the deployed project.
 
 ## What the host can see
 
-Cloudflare can see that a row exists, about how large it is, when it changed, and which Google account owns it. The account id is stored so only the author can edit. Either person can delete a note. The date, text, tag, IMPORTANT marker, and author name are inside the ciphertext. Deleted rows can be restored from Cloudflare's free point-in-time recovery for 7 days, still encrypted.
+Cloudflare can see that a row exists, about how large it is, when it changed, and which Google account owns it. The account id is stored so only the author can edit. Either person can delete a note. The date, text, tag, IMPORTANT marker, author name, marks, pin, and which note a reply belongs to are inside the ciphertext. Deleted rows can be restored from Cloudflare's free point-in-time recovery for 7 days, still encrypted.
